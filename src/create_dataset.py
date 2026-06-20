@@ -11,6 +11,7 @@ from argparse import Namespace
 import requests
 import threading
 import shutil
+import queue
 
 from PIL import Image
 
@@ -32,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Default settings
 settings = {
-    "input_directory": "/home/alex/data/Gephyreus/Source",
-    "output_directory": "/home/alex/data/Gephyreus/CroppedValidated",
+    "input_directory": "/Users/paul/Desktop/NOS/CreateFinDataset/input",
+    "output_directory": "/Users/paul/Desktop/NOS/CreateFinDataset/output",
     "verify": True,
     "make_dir_for_crop": False,
     "base_url": "https://finwave.io/api/inference",
@@ -68,25 +69,37 @@ class FinwaveGUI:
         self.setup_logging()
 
     def setup_logging(self):
+        log_queue = queue.Queue()
+
         class TextHandler(logging.Handler):
-            def __init__(self, widget):
+            def __init__(self, message_queue):
                 super().__init__()
-                self.widget = widget
+                self.message_queue = message_queue
 
             def emit(self, record):
-                msg = self.format(record)
-                self.widget.config(state='normal')
-                self.widget.insert(tk.END, msg + '\n')
-                self.widget.config(state='disabled')
-                self.widget.yview(tk.END)
+                self.message_queue.put(self.format(record))
 
-        text_handler = TextHandler(self.log_display)
+        def poll_log_queue():
+            while True:
+                try:
+                    msg = log_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self.log_display.config(state='normal')
+                self.log_display.insert(tk.END, msg + '\n')
+                self.log_display.config(state='disabled')
+                self.log_display.yview(tk.END)
+            self.root.after(100, poll_log_queue)
+
+        text_handler = TextHandler(log_queue)
         text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(text_handler)
         logger.propagate = False  # Add this line
+        self.root.after(100, poll_log_queue)
 
     def toggle_pipeline(self):
         if not self.is_running:
+
             logger.info("Starting pipeline")
             self.is_running = True
             self.start_button.config(text="Stop Pipeline")  # Change button text to Stop
@@ -99,6 +112,11 @@ class FinwaveGUI:
             # Optionally, signal the pipeline thread to stop here if needed
 
     def start_pipeline(self):
+        logger.info("Checking server connectivity...")
+        if not self.check_server(settings["base_url"]):
+            logger.error("Server is not reachable. Please check the base URL.")
+            return
+
         logger.info(f"Starting pipeline with settings: {settings}")
         logger.info("Step 1: Data loading...")
         args = Namespace(**settings)
@@ -186,6 +204,15 @@ class FinwaveGUI:
             settings_window.destroy()
 
         Button(settings_window, text="Save", command=save_settings).grid(row=len(settings), columnspan=2, pady=10)
+    
+    def check_server(self, base_url):
+        try:
+            response = requests.get(base_url, timeout=5)
+            logger.info(f"Server reachable. Status: {response.status_code}")
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Server unreachable: {e}")
+            return False
 
 
 def get_images(directory):
