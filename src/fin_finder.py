@@ -253,9 +253,6 @@ def get_invalid_path(source, ARGS):
     return p
 
 
-
-
-
 if __name__ == "__main__":
     root = tk.Tk()
     app = FinwaveGUI(root)

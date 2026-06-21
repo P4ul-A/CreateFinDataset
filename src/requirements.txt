@@ -1,3 +1,4 @@
 requests
 Pillow==10.2.0
 pyinstaller
+rawpy

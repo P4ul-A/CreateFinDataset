@@ -2,6 +2,12 @@
 .venv
 venv
 .idea
+__pycache__/
+.DS_Store
+
+
 input/
 output/
-__pycache__/
+jpeg_output/
+test_outputs/
+.DS_Store
