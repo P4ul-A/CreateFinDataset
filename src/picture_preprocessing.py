@@ -14,8 +14,8 @@ except ImportError:  # rawpy is only needed for camera RAW formats.
 
 
 # User settings
-INPUT_DIR = "/Users/paul/Desktop/NOS/CreateFinDataset/input"
-OUTPUT_DIR = "/Users/paul/Desktop/NOS/CreateFinDataset/jpeg_output"
+INPUT_DIR = "/Users/paul/Desktop/NOS/FinDetection/rissos_cropping_dataset"
+OUTPUT_DIR = "/Users/paul/Desktop/NOS/FinDetection/rissos_cropping_dataset_jpeg"
 JPEG_QUALITY = 75
 
 

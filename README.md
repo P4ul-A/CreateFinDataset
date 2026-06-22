@@ -59,13 +59,27 @@ python3 src/cluster_orca_id_images.py \
 
 This calls the `/fin-detect` API and writes `summary__<ID>.jpg` in each ID
 output folder. No separate `boxed__...jpg` images are written.
+Images on the summary slide are ordered by capture time. The original image
+matching the manual ID image is marked in the time series with a blue frame.
 
 The largest detected fin box in each manual ID image is used as the reference.
 Additional images are kept when their closest fin box center moves no more than
 `--max-box-movement-per-step` pixels per image step away from the manual image.
 They must also pass `--max-box-size-change-ratio`; `2.0` means the candidate
 box area can be between half and double the manual reference box area. Kept
-boxes are green; discarded boxes are grey.
+boxes are green; discarded boxes are grey. Discarded summary-slide labels include
+a short reason: `movement`, `size`, `movement+size`, `no box`, or `no ref`.
 
 Approved green boxes are also cropped into a `cropped/` directory inside each
 ID output folder.
+
+Each approved crop also gets a matching YOLO label file under
+`cropped/yolo_labels/`. The label stores the approved crop box coordinates in
+YOLO format, normalized by the source image size:
+
+```text
+0 x_center y_center width height
+```
+
+An `overall_summary.txt` file is written in the main output directory with run
+settings, total counts, and per-ID counts.

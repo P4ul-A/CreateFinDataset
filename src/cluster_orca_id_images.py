@@ -18,13 +18,16 @@ try:
 except ImportError:
     requests = None
 
+# Detection Settings
+TIMESPAN_SECONDS = 1.5
+MAX_BOX_MOVEMENT_PER_STEP = 300.0
+MAX_BOX_SIZE_CHANGE_RATIO = 2
 
 # User settings
 ID_DIR = "/Users/paul/Desktop/NOS/CreateFinDataset/test_outputs/quality_75/Orca_ID/2022-09-07_Andøya_RichardKaroliussen_IDs"
 ORIGINAL_DIR = "/Users/paul/Desktop/NOS/CreateFinDataset/test_outputs/quality_75/Orca_ID/2022-09-07_Andøya_RichardKaroliussen_All_pictures"
 OUTPUT_DIR = "/Users/paul/Desktop/NOS/CreateFinDataset/output/orca_id_clusters"
-TIMESPAN_SECONDS = 3
-BASE_URL = "https://finwave.io/api/inference"
+BASE_URL = "http://127.0.0.1:8000/api/inference"
 DETECT_PATH = "/fin-detect"
 VERIFY_SSL = True
 BOX_COLOR = "lime"
@@ -32,11 +35,10 @@ DISCARDED_BOX_COLOR = "gray"
 BOX_WIDTH = 24
 REQUEST_TIMEOUT_SECONDS = 60
 DRAW_BOXES = True
-MAX_BOX_MOVEMENT_PER_STEP = 300.0
-MAX_BOX_SIZE_CHANGE_RATIO = 1.25
+YOLO_CLASS_ID = 0
 SUMMARY_THUMBNAIL_WIDTH = 420
 SUMMARY_THUMBNAIL_HEIGHT = 280
-SUMMARY_COLUMNS = 3
+SUMMARY_COLUMNS = 4
 
 
 IMAGE_EXTENSIONS = {
@@ -160,15 +162,22 @@ def cluster_id_images(
                 continue
             copied_cluster_paths.add(target_path.resolve())
             source_key = cluster_image.resolve()
+            is_manual_original = (
+                original_id_image is not None
+                and source_key == original_id_image.resolve()
+            )
             if source_key not in summary_group["additional_sources"]:
                 summary_group["additional"].append(
                     {
                         "path": target_path,
                         "source_path": cluster_image,
                         "source_index": get_source_index(cluster_image, original_order),
+                        "is_manual_original": is_manual_original,
                     }
                 )
                 summary_group["additional_sources"].add(source_key)
+            elif is_manual_original:
+                mark_manual_original(summary_group["additional"], source_key)
 
         clustered_counts.append(len(cluster_images))
         print_progress_bar(index, len(id_images), start_time)
@@ -182,7 +191,7 @@ def cluster_id_images(
         box_cache = {}
         for index, summary_group in enumerate(summary_items, start=1):
             try:
-                create_summary_slide(
+                summary_group["summary_stats"] = create_summary_slide(
                     summary_group,
                     base_url,
                     detect_path,
@@ -219,6 +228,37 @@ def cluster_id_images(
         print(f"ID images skipped because no timestamp was available: {len(id_images_without_time)}")
     if id_images_without_original:
         print(f"ID images where the exact original image was not found by filename: {len(id_images_without_original)}")
+
+    summary_path = write_overall_summary(
+        output_path,
+        {
+            "started_at": started_at,
+            "finished_at": datetime.now(),
+            "id_dir": id_path,
+            "original_dir": original_path,
+            "output_dir": output_path,
+            "timespan_seconds": timespan_seconds,
+            "use_mtime_fallback": use_mtime_fallback,
+            "draw_boxes": draw_boxes,
+            "base_url": base_url,
+            "detect_path": detect_path,
+            "max_box_movement_per_step": max_box_movement_per_step,
+            "max_box_size_change_ratio": max_box_size_change_ratio,
+            "total_id_images": len(id_images),
+            "total_original_images": len(original_images),
+            "original_images_with_timestamps": len(original_records),
+            "id_images_with_timestamps": id_images_with_time,
+            "images_used_for_clustering": len(copied_cluster_paths),
+            "average_clustered_images": average(clustered_counts),
+            "summary_slides_created": summary_slides_created,
+            "summary_slides_failed": summary_slides_failed,
+            "original_images_without_timestamps": len(missing_original_times),
+            "id_images_without_timestamps": len(id_images_without_time),
+            "id_images_without_original": len(id_images_without_original),
+            "summary_groups": summary_groups,
+        },
+    )
+    print(f"Overall summary written to: {summary_path}")
 
 
 def get_image_files(directory):
@@ -373,6 +413,13 @@ def get_source_index(source_path, original_order):
     return original_order.get(source_path.resolve())
 
 
+def mark_manual_original(additional_records, source_key):
+    for record in additional_records:
+        if record["source_path"].resolve() == source_key:
+            record["is_manual_original"] = True
+            return
+
+
 def copy_unique(source_path, target_path):
     target_path = get_unique_target_path(target_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -384,7 +431,8 @@ def save_approved_crop(image_path, box, crop_dir, source_label):
     crop_dir.mkdir(parents=True, exist_ok=True)
     with Image.open(image_path) as image:
         image = image.convert("RGB")
-        left, top, right, bottom = clamp_box(box, image.size)
+        image_size = image.size
+        left, top, right, bottom = clamp_box(box, image_size)
         if right <= left or bottom <= top:
             return None
         crop = image.crop((left, top, right, bottom))
@@ -392,7 +440,101 @@ def save_approved_crop(image_path, box, crop_dir, source_label):
     target_path = crop_dir / f"{source_label}__{crop_file_stem(image_path)}_fin.jpg"
     target_path = get_unique_target_path(target_path)
     crop.save(target_path, quality=95)
+    save_yolo_label_for_crop(target_path, (left, top, right, bottom), image_size)
     return target_path
+
+
+def save_yolo_label_for_crop(crop_path, source_box, source_image_size):
+    label_path = yolo_label_path_for_crop(crop_path)
+    label_path.parent.mkdir(parents=True, exist_ok=True)
+    x_center, y_center, width, height = box_to_yolo(source_box, source_image_size)
+    label_path.write_text(
+        f"{YOLO_CLASS_ID} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n",
+        encoding="utf-8",
+    )
+    return label_path
+
+
+def yolo_label_path_for_crop(crop_path):
+    return crop_path.parent / "yolo_labels" / f"{crop_path.stem}.txt"
+
+
+def box_to_yolo(box, image_size):
+    image_width, image_height = image_size
+    left, top, right, bottom = box
+    box_width = right - left
+    box_height = bottom - top
+    x_center = left + box_width / 2
+    y_center = top + box_height / 2
+    return (
+        x_center / image_width,
+        y_center / image_height,
+        box_width / image_width,
+        box_height / image_height,
+    )
+
+
+def write_overall_summary(output_path, report):
+    output_path.mkdir(parents=True, exist_ok=True)
+    summary_path = output_path / "overall_summary.txt"
+    lines = [
+        "Orca ID clustering summary",
+        f"Started: {format_datetime(report['started_at'])}",
+        f"Finished: {format_datetime(report['finished_at'])}",
+        "",
+        "Settings",
+        f"ID directory: {report['id_dir']}",
+        f"Original directory: {report['original_dir']}",
+        f"Output directory: {report['output_dir']}",
+        f"Timespan seconds: {report['timespan_seconds']}",
+        f"Use modification-time fallback: {report['use_mtime_fallback']}",
+        f"Draw summary boxes: {report['draw_boxes']}",
+        f"Detection API: {report['base_url'].rstrip('/')}/{report['detect_path'].lstrip('/')}",
+        f"Max box movement per step: {report['max_box_movement_per_step']}",
+        f"Max box size change ratio: {report['max_box_size_change_ratio']}",
+        "",
+        "Totals",
+        f"Total ID images: {report['total_id_images']}",
+        f"Total original images analysed for clustering: {report['total_original_images']}",
+        f"Original images with usable timestamps: {report['original_images_with_timestamps']}",
+        f"ID images with usable timestamps: {report['id_images_with_timestamps']}",
+        f"Images used for clustering: {report['images_used_for_clustering']}",
+        f"Average number of clustered images: {report['average_clustered_images']:.2f}",
+        f"Summary slides created: {report['summary_slides_created']}",
+        f"Summary slides failed: {report['summary_slides_failed']}",
+        f"Original images without timestamps: {report['original_images_without_timestamps']}",
+        f"ID images without timestamps: {report['id_images_without_timestamps']}",
+        f"ID images without exact original filename match: {report['id_images_without_original']}",
+        "",
+        "Per ID",
+    ]
+
+    for id_name in sorted(report["summary_groups"]):
+        group = report["summary_groups"][id_name]
+        stats = group.get("summary_stats", {})
+        lines.extend(
+            [
+                f"{id_name}",
+                f"  Output folder: {group['output_dir']}",
+                f"  Manual images: {len(group['manual'])}",
+                f"  Additional clustered images: {len(group['additional'])}",
+                f"  Manual kept: {stats.get('manual_kept', 0)}",
+                f"  Manual discarded: {stats.get('manual_discarded', 0)}",
+                f"  Additional kept: {stats.get('additional_kept', 0)}",
+                f"  Additional discarded: {stats.get('additional_discarded', 0)}",
+                f"  Discarded by movement: {stats.get('discarded_movement', 0)}",
+                f"  Discarded by size: {stats.get('discarded_size', 0)}",
+                f"  Discarded by movement+size: {stats.get('discarded_movement_size', 0)}",
+                f"  Discarded no box/ref: {stats.get('discarded_no_box_or_ref', 0)}",
+                f"  Original time-series images highlighted: {stats.get('original_highlighted', 0)}",
+                f"  Approved crops: {stats.get('approved_crops', 0)}",
+                f"  YOLO label files: {stats.get('yolo_labels', 0)}",
+                f"  Summary slide: {stats.get('summary_slide', '')}",
+            ]
+        )
+
+    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return summary_path
 
 
 def crop_file_stem(image_path):
@@ -431,22 +573,25 @@ def create_summary_slide(
         box_cache,
     )
 
+    manual_records = sorted_records_by_time(summary_group["manual"])
+    additional_records = sorted_records_by_time(summary_group["additional"])
+
     manual_tiles = [
         create_manual_summary_tile(
             record,
-            "MANUAL",
+            "IDed",
             box_color,
             discarded_box_color,
             box_width,
             manual_references,
             crop_dir,
         )
-        for record in summary_group["manual"]
+        for record in manual_records
     ]
     additional_tiles = [
         create_candidate_summary_tile(
             record,
-            "ADDITIONAL",
+            "Added",
             base_url,
             detect_path,
             verify_ssl,
@@ -460,7 +605,7 @@ def create_summary_slide(
             manual_references,
             crop_dir,
         )
-        for record in summary_group["additional"]
+        for record in additional_records
     ]
 
     tiles = manual_tiles + additional_tiles
@@ -471,6 +616,7 @@ def create_summary_slide(
     target_path = summary_group["output_dir"] / f"summary__{safe_path_name(summary_group['id_name'])}.jpg"
     target_path.parent.mkdir(parents=True, exist_ok=True)
     slide.save(target_path, quality=95)
+    return summarize_tiles(manual_tiles, additional_tiles, target_path)
 
 
 def build_manual_references(
@@ -504,6 +650,17 @@ def build_manual_references(
     return references
 
 
+def sorted_records_by_time(records):
+    return sorted(
+        records,
+        key=lambda record: (
+            record["source_index"] is None,
+            record["source_index"] if record["source_index"] is not None else 0,
+            str(record["source_path"]),
+        ),
+    )
+
+
 def create_manual_summary_tile(
     record,
     label,
@@ -515,8 +672,9 @@ def create_manual_summary_tile(
 ):
     image_path = record["path"]
     reference = next((item for item in manual_references if item["path"] == image_path), None)
+    crop_path = None
     if reference:
-        save_approved_crop(image_path, reference["box"], crop_dir, "manual")
+        crop_path = save_approved_crop(image_path, reference["box"], crop_dir, "manual")
     image = render_classified_thumbnail(
         image_path,
         [(reference["box"], True)] if reference else [],
@@ -525,12 +683,14 @@ def create_manual_summary_tile(
         discarded_box_color,
         box_width,
     )
-    status = "KEEP" if reference else "DISCARD"
+    status = "KEEP" if reference else "NOT"
     return {
         "image": image,
         "label": label,
         "status": status,
         "filename": image_path.name,
+        "crop_path": crop_path,
+        "is_manual_original": False,
     }
 
 
@@ -559,7 +719,7 @@ def create_candidate_summary_tile(
         request_timeout,
         box_cache,
     )
-    kept_box = choose_kept_box(
+    kept_box, discard_reason = classify_candidate_box(
         boxes,
         record["source_index"],
         manual_references,
@@ -567,8 +727,9 @@ def create_candidate_summary_tile(
         max_box_size_change_ratio,
     )
     discarded_boxes = [box for box in boxes if box != kept_box]
+    crop_path = None
     if kept_box:
-        save_approved_crop(image_path, kept_box, crop_dir, "additional")
+        crop_path = save_approved_crop(image_path, kept_box, crop_dir, "additional")
     image = render_classified_thumbnail(
         image_path,
         [(kept_box, True)] if kept_box else [],
@@ -583,7 +744,37 @@ def create_candidate_summary_tile(
         "label": label,
         "status": status,
         "filename": image_path.name,
+        "crop_path": crop_path,
+        "is_manual_original": record.get("is_manual_original", False),
+        "discard_reason": discard_reason,
     }
+
+
+def summarize_tiles(manual_tiles, additional_tiles, summary_slide_path):
+    crop_paths = [tile["crop_path"] for tile in manual_tiles + additional_tiles if tile.get("crop_path")]
+    return {
+        "manual_kept": count_status(manual_tiles, "KEEP"),
+        "manual_discarded": count_status(manual_tiles, "DISCARD"),
+        "additional_kept": count_status(additional_tiles, "KEEP"),
+        "additional_discarded": count_status(additional_tiles, "DISCARD"),
+        "discarded_movement": count_discard_reason(additional_tiles, "movement"),
+        "discarded_size": count_discard_reason(additional_tiles, "size"),
+        "discarded_movement_size": count_discard_reason(additional_tiles, "movement+size"),
+        "discarded_no_box_or_ref": count_discard_reason(additional_tiles, "no box")
+        + count_discard_reason(additional_tiles, "no ref"),
+        "original_highlighted": sum(1 for tile in additional_tiles if tile.get("is_manual_original")),
+        "approved_crops": len(crop_paths),
+        "yolo_labels": sum(1 for crop_path in crop_paths if yolo_label_path_for_crop(crop_path).is_file()),
+        "summary_slide": summary_slide_path,
+    }
+
+
+def count_status(tiles, status):
+    return sum(1 for tile in tiles if tile.get("status") == status)
+
+
+def count_discard_reason(tiles, reason):
+    return sum(1 for tile in tiles if tile.get("discard_reason") == reason)
 
 
 def render_classified_thumbnail(
@@ -640,15 +831,22 @@ def box_area(box):
     return max(0, right - left) * max(0, bottom - top)
 
 
-def choose_kept_box(
+def classify_candidate_box(
     boxes,
     candidate_source_index,
     manual_references,
     max_box_movement_per_step,
     max_box_size_change_ratio,
 ):
+    if not boxes:
+        return None, "no box"
+    if not manual_references:
+        return None, "no ref"
+
     best_match = None
     best_distance = None
+    saw_movement_pass = False
+    saw_size_pass = False
 
     for box in boxes:
         for reference in manual_references:
@@ -658,15 +856,25 @@ def choose_kept_box(
                 step_distance = abs(candidate_source_index - reference["source_index"])
             allowed_distance = float(max_box_movement_per_step) * max(1, step_distance)
             distance = box_center_distance(box, reference["box"])
+            movement_ok = distance <= allowed_distance
+            size_ok = box_size_is_allowed(box, reference["box"], max_box_size_change_ratio)
+            saw_movement_pass = saw_movement_pass or movement_ok
+            saw_size_pass = saw_size_pass or size_ok
             if (
-                distance <= allowed_distance
-                and box_size_is_allowed(box, reference["box"], max_box_size_change_ratio)
+                movement_ok
+                and size_ok
                 and (best_distance is None or distance < best_distance)
             ):
                 best_match = box
                 best_distance = distance
 
-    return best_match
+    if best_match:
+        return best_match, ""
+    if not saw_movement_pass and not saw_size_pass:
+        return None, "movement+size"
+    if not saw_movement_pass:
+        return None, "movement"
+    return None, "size"
 
 
 def box_size_is_allowed(candidate_box, reference_box, max_box_size_change_ratio):
@@ -776,10 +984,24 @@ def paste_section(slide, draw, title, tiles, margin, y, columns, gap, tile_width
         image = tile["image"]
         image_x = x + (tile_width - image.width) // 2
         slide.paste(image, (image_x, tile_y))
+        if tile.get("is_manual_original"):
+            draw_tile_frame(draw, image_x, tile_y, image.width, image.height, "blue", 8)
         label = f"{tile['label']} {tile['status']}: {tile['filename']}"
+        if tile.get("status") == "DISCARD" and tile.get("discard_reason"):
+            label = f"{tile['label']} DISCARD {tile['discard_reason']}: {tile['filename']}"
+        if tile.get("is_manual_original"):
+            label = f"ORIGINAL {label}"
         draw.text((x, tile_y + SUMMARY_THUMBNAIL_HEIGHT + 8), truncate_text(label, 58), fill="black")
 
     return y + rows_needed(len(tiles), columns) * tile_height + max(0, rows_needed(len(tiles), columns) - 1) * gap
+
+
+def draw_tile_frame(draw, x, y, width, height, color, line_width):
+    for offset in range(line_width):
+        draw.rectangle(
+            (x - offset, y - offset, x + width + offset, y + height + offset),
+            outline=color,
+        )
 
 
 def rows_needed(item_count, columns):
